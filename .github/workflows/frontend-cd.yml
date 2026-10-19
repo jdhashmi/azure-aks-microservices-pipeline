@@ -1,0 +1,91 @@
+# week08/.github/workflows/frontend-cd.yml
+
+name: CD - Deploy Frontend to AKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_api_ip:
+        description: 'External IP of Product Service'
+        required: true
+        default: 'http://<ip_address>:8000'
+      order_api_ip:
+        description: 'External IP of Order Service (e.g., http://Y.Y.Y.Y:8001)'
+        required: true
+        default: 'http://<ip_address>:8001'
+      aks_cluster_name:
+        description: 'Name of the AKS Cluster to deploy to'
+        required: true
+        default: 'aks-week08'
+      aks_resource_group:
+        description: 'Resource Group of the AKS Cluster'
+        required: true
+        default: 'rg-week08'
+
+  workflow_call:
+    inputs:
+      product_api_ip:
+        required: true
+        type: string
+      order_api_ip:
+        required: true
+        type: string
+      aks_cluster_name:
+        required: true
+        type: string
+      aks_resource_group:
+        required: true
+        type: string
+
+env:
+  ACR_NAME: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}.azurecr.io
+
+jobs:
+  deploy_frontend:
+    runs-on: ubuntu-latest
+    environment: Production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+          az acr login --name ${{ env.ACR_NAME }} --expose-token --output tsv --query accessToken | docker login ${{ env.ACR_LOGIN_SERVER }} --username 00000000-0000-0000-0000-000000000000 --password-stdin
+
+      - name: Inject Backend IPs into Frontend main.js
+        run: |
+          echo "Injecting IPs into frontend/static/js/main.js"
+          sed -i "s|_PRODUCT_API_URL_|${{ inputs.product_api_ip }}|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|${{ inputs.order_api_ip }}|g" frontend/main.js
+          
+          echo "--- Modified main.js content ---"
+          cat frontend/main.js
+          echo "---------------------------------"
+
+      - name: Build and Push Frontend Image
+        run: |
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/frontend:latest ./frontend/
+          docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:latest
+
+      - name: Set Kubernetes context (get AKS credentials)
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ inputs.aks_resource_group }}
+          cluster-name: ${{ inputs.aks_cluster_name }}
+
+      - name: Deploy Frontend to AKS
+        run: |
+          echo "Deploying frontend with latest tag to AKS cluster: ${{ inputs.aks_cluster_name }}"
+          cd k8s/
+          kubectl apply -f frontend.yaml
+
+      - name: Logout from Azure
+        run: az logout
